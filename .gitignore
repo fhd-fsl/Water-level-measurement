@@ -31,6 +31,7 @@ Data/
 *.jpeg
 *.png
 output_measurement.mp4
+!sample_output.jpg
 
 # Config files (if you want users to recalibrate)
 # config.json
