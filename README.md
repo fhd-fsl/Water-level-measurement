@@ -4,6 +4,8 @@ This repository implements a robust, real-time computer vision pipeline to measu
 
 The system uses **Feature-Based Tracking (ORB + Homography)** to compensate for real-world camera shake/vibration and **Edge Density Analysis** to accurately detect the water level line.
 
+![Sample Output](sample_output.jpg)
+
 ## Core Features
 
 - **Dynamic Tracking**: Automatically tracks the ruler even if the camera translates or rotates, preventing measurement drift.
