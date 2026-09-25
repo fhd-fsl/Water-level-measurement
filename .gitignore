@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+venv/
+.venv/
+
+# Data and Outputs
+Data/
+*.mp4
+*.avi
+*.mkv
+*.jpg
+*.jpeg
+*.png
+output_measurement.mp4
+
+# Config files (if you want users to recalibrate)
+# config.json
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
