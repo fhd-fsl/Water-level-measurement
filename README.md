@@ -25,9 +25,6 @@ The system uses **Feature-Based Tracking (ORB + Homography)** to compensate for 
 | `core.py` | All pipeline logic: `setup_reference`, `track_ruler`, `calculate_water_y`, `get_water_level`, `apply_shake` |
 | `run.py` | **Main entry point** — runs the pipeline in normal / nv / mixed mode |
 | `simulate_nightvision.py` | NV filter (tunable parameters at the top) + `simulate_nv()` |
-| `inspect_frame.py` | Interactive per-frame pipeline debugger |
-| `preview_nv.py` | Plays all frames through the NV filter live for visual tuning |
-| `evaluate_nv.py` | Runs both pipelines and produces comparison plots |
 
 ## Installation
 
@@ -82,18 +79,6 @@ python run.py --mode mixed --output my_test.mp4
 
 Output video is saved as `output_<mode>.mp4` by default.
 
-### 4. Inspect / debug (optional)
-
-```bash
-# Step through individual frames interactively
-python inspect_frame.py          # type frame number, add 's' for shake (e.g. 50s)
-
-# Preview NV filter across all frames before running the pipeline
-python preview_nv.py             # SPACE = pause, +/- = speed, Q = quit
-
-# Compare normal vs NV measurements across all frames
-python evaluate_nv.py            # outputs evaluation_plot.png + evaluation_edgescan.png
-```
 
 ## Tuning the NV Filter
 
