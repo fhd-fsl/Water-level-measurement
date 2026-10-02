@@ -127,41 +127,56 @@ def track_ruler(frame, ref_data):
 
 # --- Bottom-Up Edge Density Scan (same proven algorithm) ---
 
-def calculate_water_y(frame, bbox):
+def calculate_water_y(frame, bbox,
+                       blur_ksize=5,
+                       canny_low=30, canny_high=120,
+                       smooth_window=50,
+                       threshold_frac=0.25):
     """
     Runs the bottom-up edge density scan on the given bounding box region.
+
+    Parameters (all optional — defaults match the original tuning):
+        blur_ksize      — Gaussian blur kernel size (must be odd); increase to
+                          suppress sensor noise before edge detection
+        canny_low/high  — Canny hysteresis thresholds; raise both to ignore
+                          weak false edges from noise
+        smooth_window   — convolution window for vertical density smoothing
+        threshold_frac  — fraction of peak density used as the water threshold;
+                          raise (e.g. 0.40) to avoid triggering on noise floor
+
     Returns: abs_y, crop, edges, smoothed, threshold, top_y_crop
     """
     x1, y1, x2, y2 = bbox["x1"], bbox["y1"], bbox["x2"], bbox["y2"]
-    
+
     crop = frame[y1:y2, x1:x2].copy()
     if crop.size == 0:
         return y2, crop, np.array([]), np.array([]), 0, 0
-    
+
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
-    
+    # Ensure blur kernel is odd
+    ksize = blur_ksize if blur_ksize % 2 == 1 else blur_ksize + 1
+    gray = cv2.GaussianBlur(gray, (ksize, ksize), 0)
+
     # Edge Detection
-    edges = cv2.Canny(gray, 30, 120)
-    
+    edges = cv2.Canny(gray, canny_low, canny_high)
+
     # Horizontal Edge Density
     row_sums = np.sum(edges, axis=1)
-    
-    # Smooth the density vertically (50-pixel window)
-    window_size = 50
-    smoothed = np.convolve(row_sums, np.ones(window_size)/window_size, mode='same')
-    
+
+    # Smooth the density vertically
+    smoothed = np.convolve(row_sums, np.ones(smooth_window)/smooth_window, mode='same')
+
     # Find water level by scanning from bottom UPWARDS
-    threshold = np.max(smoothed) * 0.25
+    threshold = np.max(smoothed) * threshold_frac
     top_y_crop = len(smoothed) - 1
-    
+
     for y in range(len(smoothed)-1, -1, -1):
         if smoothed[y] > threshold:
             top_y_crop = y
             break
-            
+
     abs_y = top_y_crop + y1
-    
+
     return abs_y, crop, edges, smoothed, threshold, top_y_crop
 
 
