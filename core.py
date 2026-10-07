@@ -188,6 +188,30 @@ def get_water_level(y_pixel, marks):
     return np.interp(y_pixel, y_vals, inch_vals)
 
 
+# --- Brightness Normalization ---
+
+# Luminance threshold below which CLAHE is applied.
+# Frames with mean L above this are already well-exposed — CLAHE would
+# flatten the ruler contrast and confuse the edge scan.
+NORMALIZE_DARK_THRESHOLD = 100   # 0–255 LAB L-channel mean
+
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+def normalize_brightness(frame):
+    """
+    Apply CLAHE to the L channel of LAB color space, but only when the frame
+    is underexposed (mean luminance < NORMALIZE_DARK_THRESHOLD).
+    Normalizes dark frames without degrading well-exposed or overexposed ones.
+    """
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    if l.mean() >= NORMALIZE_DARK_THRESHOLD:
+        return frame   # already bright enough — skip equalization
+    l_eq = _clahe.apply(l)
+    lab_eq = cv2.merge([l_eq, a, b])
+    return cv2.cvtColor(lab_eq, cv2.COLOR_LAB2BGR)
+
+
 # --- Artificial Shake ---
 
 def apply_shake(frame, max_translate=15, max_angle=2.0):

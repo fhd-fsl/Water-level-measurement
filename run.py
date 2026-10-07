@@ -2,13 +2,18 @@
 run.py — unified water level measurement pipeline
 
 Usage:
-    python run.py --mode normal          standard camera
-    python run.py --mode nv              night-vision camera (simulated)
-    python run.py --mode mixed           first half normal, second half NV
-    python run.py --mode nv --no-shake   disable artificial shake
+    python run.py --mode normal              standard camera
+    python run.py --mode nv                  night-vision camera (simulated)
+    python run.py --mode mixed               first half normal, second half NV
+    python run.py --mode brightness          exposure/auto-exposure + cloud shadows
+    python run.py --mode glare               glare & specular highlights + lens flare
+    python run.py --mode reflections         water surface reflections
+    python run.py --mode outdoor_mixed       all outdoor effects combined
+    python run.py --mode nv --no-shake       disable artificial shake
     python run.py --mode mixed --output my_run.mp4
 
 The NV filter reads its settings from simulate_nightvision.py.
+Outdoor filters read their settings from simulate_outdoor.py.
 Edge-scan parameters are tuned per mode in EDGE_PARAMS below.
 """
 
@@ -19,19 +24,40 @@ import glob
 import os
 import numpy as np
 
-from core import setup_reference, track_ruler, calculate_water_y, get_water_level, apply_shake
+from core import setup_reference, track_ruler, calculate_water_y, get_water_level, apply_shake, normalize_brightness
 from simulate_nightvision import simulate_nv, MODE, NOISE_SIGMA, IR_HOTSPOT_STRENGTH, \
     IR_HOTSPOT_RADIUS, GAMMA, BLUR_SIGMA, CONTRAST_CLIP
+from simulate_outdoor import simulate_outdoor, set_seed, SIMULATION_MODE as OUTDOOR_MODE, \
+    EXPOSURE_EV, AUTO_EXPOSURE_RANGE_EV, AUTO_EXPOSURE_SPEED, \
+    CLOUD_SHADOW_ENABLED, CLOUD_SHADOW_STRENGTH, CLOUD_SHADOW_COUNT, CLOUD_SHADOW_SCALE, \
+    GLARE_ENABLED, GLARE_INTENSITY, GLARE_SIZE_X, GLARE_SIZE_Y, GLARE_POSITION_X, GLARE_POSITION_Y, \
+    LENS_FLARE_ENABLED, LENS_FLARE_STRENGTH, LENS_FLARE_COUNT, LENS_FLARE_SOURCE_X, LENS_FLARE_SOURCE_Y, \
+    REFLECTION_ENABLED, REFLECTION_STRENGTH, REFLECTION_DISTORTION, REFLECTION_WAVE_FREQ, \
+    REFLECTION_BLUR_SIGMA, REFLECTION_FADE_START, REFLECTION_FADE_END, \
+    WATER_LEVEL_RATIO, RANDOM_SEED
+
+# ---------------------------------------------------------------------------
+# Mode routing
+# ---------------------------------------------------------------------------
+
+# Outdoor modes and the simulate_outdoor() sub-mode they map to
+OUTDOOR_MODES = {
+    "brightness":    "exposure",
+    "glare":         "glare",
+    "reflections":   "reflection",
+    "outdoor_mixed": "all",
+}
 
 # ---------------------------------------------------------------------------
 # Per-mode edge scan parameters
-# Tune these if you adjust the NV filter settings in simulate_nightvision.py
+# Outdoor modes keep normal params — the image is still colour, just with
+# environmental effects layered on top.
 # ---------------------------------------------------------------------------
 EDGE_PARAMS = {
     "normal": dict(
         blur_ksize=5,
         canny_low=30, canny_high=120,
-        smooth_window=50,
+        smooth_window=75,
         threshold_frac=0.25,
     ),
     "nv": dict(
@@ -41,15 +67,18 @@ EDGE_PARAMS = {
         threshold_frac=0.40,  # higher bar — only trigger on strong edge bands
     ),
 }
+# Outdoor modes share normal edge params
+for _m in OUTDOOR_MODES:
+    EDGE_PARAMS[_m] = EDGE_PARAMS["normal"]
 
-# Shake settings (mirrors original measure_water.py)
+# Shake settings
 SHAKE_MAX_TRANSLATE = 15   # pixels
 SHAKE_MAX_ANGLE     = 2.0  # degrees
 SMOOTHING_FRAMES    = 2    # moving-average window
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Frame-level filter helpers
 # ---------------------------------------------------------------------------
 
 def apply_nv_filter(frame):
@@ -57,37 +86,78 @@ def apply_nv_filter(frame):
                        IR_HOTSPOT_RADIUS, GAMMA, BLUR_SIGMA, CONTRAST_CLIP)
 
 
+def apply_outdoor_filter(frame, outdoor_sub_mode, frame_idx, total_frames):
+    """Apply the requested outdoor effect using settings from simulate_outdoor.py."""
+    h = frame.shape[0]
+    water_y = int(h * WATER_LEVEL_RATIO)
+    return simulate_outdoor(frame, frame_idx=frame_idx, total_frames=total_frames,
+                            water_y=water_y, mode=outdoor_sub_mode)
+
+
 def frame_mode_for(i, total, mode):
-    """Return 'normal' or 'nv' for frame index i given the run mode."""
-    if mode == "normal":
-        return "normal"
+    """
+    Return the per-frame camera type used for edge-param lookup.
+    Mixed: first half normal, second half NV.
+    Outdoor modes always use 'normal' edge params but their own filter.
+    """
     if mode == "nv":
         return "nv"
-    # mixed: first half normal, second half nv
-    return "normal" if i < total // 2 else "nv"
+    if mode == "mixed":
+        return "normal" if i < total // 2 else "nv"
+    # normal and all outdoor modes
+    return "normal"
+
+
+# ---------------------------------------------------------------------------
+# Mode label for on-screen overlay
+# ---------------------------------------------------------------------------
+
+MODE_LABELS = {
+    "normal":        ("Cam: NORMAL",      (200, 200, 200)),
+    "nv":            ("Cam: NV",          (0, 220, 255)),
+    "mixed":         ("Cam: MIXED",       (200, 200, 200)),   # updated per-frame below
+    "brightness":    ("FX: BRIGHTNESS",   (255, 200, 50)),
+    "glare":         ("FX: GLARE",        (50, 200, 255)),
+    "reflections":   ("FX: REFLECTIONS",  (50, 255, 200)),
+    "outdoor_mixed": ("FX: OUTDOOR ALL",  (100, 255, 100)),
+}
 
 
 # ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def process(frame_files, config, mode, enable_shake, output_path):
+def process(frame_files, config, mode, enable_shake, output_path, normalize=False):
     n = len(frame_files)
 
-    # Reference frame is always normal — ORB is robust enough across the
-    # normal→NV transition in mixed mode (confirmed by evaluate_nv.py results)
+    # Seed the outdoor RNG once for reproducibility
+    if mode in OUTDOOR_MODES:
+        set_seed(RANDOM_SEED)
+
+    # Reference frame: use NV filter for pure NV mode; raw otherwise.
+    # For mixed mode the reference stays normal — ORB bridges the transition well.
     ref_raw   = cv2.imread(frame_files[0])
     ref_frame = apply_nv_filter(ref_raw) if mode == "nv" else ref_raw
+    if normalize:
+        ref_frame = normalize_brightness(ref_frame)
 
     print("Setting up ORB reference features...")
     ref_data = setup_reference(config, ref_frame)
     print(f"Extracted {len(ref_data['kp_ref'])} reference keypoints.")
-    print(f"Mode: {mode}  |  shake: {'on' if enable_shake else 'off'}")
+    print(f"Mode: {mode}  |  shake: {'on' if enable_shake else 'off'}  |  normalize: {'on' if normalize else 'off'}")
+
     if mode == "nv":
         print(f"NV filter: {MODE}, noise={NOISE_SIGMA}, hotspot={IR_HOTSPOT_STRENGTH}, "
               f"gamma={GAMMA}, blur={BLUR_SIGMA}")
-    if mode == "mixed":
+    elif mode == "mixed":
         print(f"Mixed split: frames 0–{n//2 - 1} normal, {n//2}–{n-1} NV")
+    elif mode in OUTDOOR_MODES:
+        sub = OUTDOOR_MODES[mode]
+        print(f"Outdoor filter: sub-mode='{sub}' | exposure_ev={EXPOSURE_EV} | "
+              f"auto_range={AUTO_EXPOSURE_RANGE_EV}EV")
+        print(f"  glare={GLARE_ENABLED}({GLARE_INTENSITY}) | "
+              f"flare={LENS_FLARE_ENABLED}({LENS_FLARE_STRENGTH}) | "
+              f"reflection={REFLECTION_ENABLED}({REFLECTION_STRENGTH})")
     print()
 
     h, w = ref_frame.shape[:2]
@@ -98,15 +168,27 @@ def process(frame_files, config, mode, enable_shake, output_path):
     failed  = 0
 
     for i, f_path in enumerate(frame_files):
-        raw  = cv2.imread(f_path)
-        fmode = frame_mode_for(i, n, mode)
-        frame = apply_nv_filter(raw) if fmode == "nv" else raw
+        raw   = cv2.imread(f_path)
+        fmode = frame_mode_for(i, n, mode)   # 'normal' or 'nv', for edge params
 
-        # Artificial shake
+        # Apply camera simulation filter
+        if fmode == "nv":
+            frame = apply_nv_filter(raw)
+        elif mode in OUTDOOR_MODES:
+            frame = apply_outdoor_filter(raw, OUTDOOR_MODES[mode], i, n)
+        else:
+            frame = raw
+
+        # Artificial shake (applied after filter so it mimics physical movement)
         shake_info = None
         if enable_shake:
             frame, tx, ty, angle = apply_shake(frame, SHAKE_MAX_TRANSLATE, SHAKE_MAX_ANGLE)
             shake_info = (tx, ty, angle)
+
+        # CLAHE brightness normalization — applied after all camera effects and shake,
+        # before ORB tracking and edge scan so both see the same normalized image.
+        if normalize:
+            frame = normalize_brightness(frame)
 
         frame_display = frame.copy()
 
@@ -162,14 +244,15 @@ def process(frame_files, config, mode, enable_shake, output_path):
             cv2.putText(frame_display, f"Shake: tx={tx} ty={ty} rot={angle:.1f}",
                         (30, h - 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 165, 255), 2)
 
-        # Mode label — white for normal, cyan for NV
-        mode_colour = (200, 200, 200) if fmode == "normal" else (0, 220, 255)
-        mode_label  = f"Cam: {fmode.upper()}"
+        # Mode label
         if mode == "mixed":
             half = "1st half" if i < n // 2 else "2nd half"
-            mode_label += f"  [{half}]"
-        cv2.putText(frame_display, mode_label, (30, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, mode_colour, 2)
+            label_text  = f"Cam: {fmode.upper()}  [{half}]"
+            label_color = (200, 200, 200) if fmode == "normal" else (0, 220, 255)
+        else:
+            label_text, label_color = MODE_LABELS[mode]
+        cv2.putText(frame_display, label_text, (30, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, label_color, 2)
 
         # Frame counter
         cv2.putText(frame_display, f"Frame {i+1}/{n}", (30, 50),
@@ -200,24 +283,38 @@ def process(frame_files, config, mode, enable_shake, output_path):
 # ---------------------------------------------------------------------------
 
 def main():
+    all_modes = ["normal", "nv", "mixed", "brightness", "glare", "reflections", "outdoor_mixed"]
+
     parser = argparse.ArgumentParser(
-        description="Water level measurement — normal / NV / mixed modes",
+        description="Water level measurement — normal / NV / mixed / outdoor modes",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
   python run.py --mode normal
   python run.py --mode nv
   python run.py --mode mixed
+  python run.py --mode brightness
+  python run.py --mode glare
+  python run.py --mode reflections
+  python run.py --mode outdoor_mixed
   python run.py --mode nv --no-shake
-  python run.py --mode mixed --output test_mixed.mp4
+  python run.py --mode glare --output test_glare.mp4
         """,
     )
     parser.add_argument(
-        "--mode", choices=["normal", "nv", "mixed"], default="normal",
-        help="normal — standard camera  |  nv — night-vision  |  mixed — 1st half normal, 2nd half NV",
+        "--mode", choices=all_modes, default="normal",
+        help=(
+            "normal — standard camera | nv — night-vision | mixed — 1st half normal, 2nd half NV | "
+            "brightness — exposure/auto-exposure/cloud shadows | "
+            "glare — specular glare + lens flare | "
+            "reflections — water surface reflections | "
+            "outdoor_mixed — all outdoor effects"
+        ),
     )
     parser.add_argument("--no-shake", action="store_true",
                         help="Disable artificial camera shake simulation")
+    parser.add_argument("--normalize", action="store_true",
+                        help="Apply CLAHE brightness normalization before tracking and edge scan")
     parser.add_argument("--output", default=None,
                         help="Output filename (default: output_<mode>.mp4)")
     args = parser.parse_args()
@@ -241,7 +338,7 @@ examples:
     output_name = args.output or f"output_{args.mode}.mp4"
     output_path = os.path.join(script_dir, output_name)
 
-    process(frame_files, config, args.mode, not args.no_shake, output_path)
+    process(frame_files, config, args.mode, not args.no_shake, output_path, normalize=args.normalize)
 
 
 if __name__ == "__main__":

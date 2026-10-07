@@ -44,7 +44,36 @@ This simulates realistic vibration of a mounted camera. The transformation is ap
 
 ## Results
 
+### Camera Shake
 The ORB tracker consistently recovered the ruler's position across all shaken frames, typically producing **50–150 inlier matches** per frame — well above the minimum of 8 required for a stable homography. The water level readings remained accurate and stable despite the injected perturbations, with measurements closely matching the ground-truth readings from the unshaken baseline.
+
+### Simulated Edge Cases
+
+All modes were tested across the full 261-frame sequence with shake disabled. Every mode achieved **0 tracking failures**.
+
+| Mode | Description | Min inliers observed |
+|---|---|---|
+| `normal` | Standard colour camera (baseline) | 95 |
+| `nv` | Near-IR / night-vision (grayscale, hotspot, grain) | — |
+| `mixed` | First half normal → second half NV | — |
+| `brightness` | Exposure compensation + auto-exposure drift + cloud shadows | 42 |
+| `glare` | Specular water-surface glare + lens flare ghosts | — |
+| `reflections` | Mirror-like water surface reflections with wave distortion | 52 |
+| `outdoor_mixed` | All outdoor effects combined | 43 |
+
+Inlier counts drop slightly under heavy outdoor effects (bright glare and cloud shadows wash out some ORB keypoints) but remain well above the 8-match floor, so tracking never fails. The bottom-up edge density scan uses the same normal-camera parameters for all outdoor modes — the Canny thresholds remain effective because the outdoor effects do not add high-frequency noise to the ruler region.
+
+## Brightness Normalization (CLAHE)
+
+Low brightness was identified as a killer edge case — dark frames reduce ORB inlier counts and weaken the Canny edge signal at the water surface.
+
+A CLAHE (Contrast Limited Adaptive Histogram Equalization) step was added as an optional pre-processing pass (`--normalize` flag):
+
+- Applied to the **L channel of LAB color space** — normalizes luminance without shifting hue or saturation
+- Uses **local 8×8 tiles** with clip limit 2.0 — handles uneven lighting (IR hotspot, partial shadow) without amplifying noise
+- **Adaptive threshold**: only fires when mean frame luminance < 100/255. Skips well-exposed and overexposed frames — applying CLAHE to a bright frame flattens ruler contrast and causes the edge scan to misfire
+
+Applied after all camera simulation filters and shake, before ORB tracking and the edge density scan, so both benefit from the normalized image. The reference frame is normalized with the same function so ORB features are extracted from a consistent representation.
 
 ## Performance
 
